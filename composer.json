@@ -1,0 +1,16 @@
+{
+    "require": {
+        "google/cloud-storage": "^1.49",
+        "smalot/pdfparser": "^2.12",
+        "google-gemini-php/client": "^2.7",
+        "phpoffice/phpword": "^1.4",
+        "setasign/fpdi": "^2.6",
+        "setasign/fpdf": "^1.8",
+        "gemini-api-php/client": "^1.7"
+    },
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
+    }
+}
