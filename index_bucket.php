@@ -16,15 +16,38 @@ use setasign\Fpdi\Fpdi;
 use PhpOffice\PhpWord\IOFactory;
 
 // --- კონფიგურაცია ---
+if (file_exists(__DIR__ . '/.env')) {
+    $envLines = file(__DIR__ . '/.env', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($envLines as $line) {
+        $line = trim($line);
+        if (empty($line) || strpos($line, '#') === 0) continue;
+        $parts = explode('=', $line, 2);
+        if (count($parts) === 2) {
+            $name = trim($parts[0]);
+            $value = trim($parts[1]);
+            putenv("$name=$value");
+            $_ENV[$name] = $value;
+        }
+    }
+}
+
 $api_key = getenv('GEMINI_API_KEY');
-$bucket_name = getenv('GOOGLE_STORAGE_BUCKET');
-$db_file = __DIR__ . '/database.sqlite';
+if (!$api_key) {
+    die("❌ Error: GEMINI_API_KEY not found!\n");
+}
+
+// HARDCODED BUCKET AS REQUESTED (Replace with your actual bucket name)
+$bucket_name = 'YOUR_BUCKET_NAME';
+$db_file = __DIR__ . '/db/database.sqlite';
 
 // --- კლიენტები ---
-if (!file_exists('google-key.json')) {
+$keyFile = __DIR__ . '/google-key.json';
+if (!file_exists($keyFile)) {
     die("❌ Error: 'google-key.json' not found!\n");
 }
-$storage = new StorageClient(['keyFilePath' => 'google-key.json']);
+putenv('GOOGLE_APPLICATION_CREDENTIALS=' . $keyFile);
+
+$storage = new StorageClient();
 $bucket  = $storage->bucket($bucket_name);
 $pdfParser = new Parser();
 $gemini = Gemini::client($api_key);
@@ -50,51 +73,115 @@ try {
     die("❌ DB Connection failed: " . $e->getMessage());
 }
 
-// --- დამხმარე ფუნქციები ---
-
-function extractTextFromDocx($filePath) {
-    try {
-        $phpWord = IOFactory::load($filePath);
-        $text = "";
-        foreach ($phpWord->getSections() as $section) {
-            $text .= extractNodeText($section);
-        }
-        return $text;
-    } catch (Exception $e) {
-        return "";
-    }
-}
-
+/**
+ * Helper to extract text from XML nodes
+ */
 function extractNodeText($node) {
     $text = "";
-    if (method_exists($node, 'getElements')) {
-        foreach ($node->getElements() as $element) {
-            $text .= extractNodeText($element);
-        }
-    } elseif (method_exists($node, 'getText')) {
-        $nodeText = $node->getText();
-        if (is_string($nodeText)) {
-            $text .= $nodeText . "\n";
+    if ($node->nodeType == XML_TEXT_NODE) {
+        $text = $node->nodeValue;
+    }
+    if ($node->hasChildNodes()) {
+        foreach ($node->childNodes as $child) {
+            $text .= extractNodeText($child);
         }
     }
     return $text;
 }
 
-function extractTextFromEpub($filePath) {
-    $zip = new ZipArchive();
+/**
+ * Extract text from DOCX
+ */
+function extractTextFromDocx($filePath) {
+    if (!file_exists($filePath)) return "";
+    
+    $zip = new ZipArchive;
     if ($zip->open($filePath) === TRUE) {
-        $text = "";
-        for ($i = 0; $i < $zip->numFiles; $i++) {
-            $name = $zip->getNameIndex($i);
-            if (preg_match('/\.(xhtml|html?)$/i', $name)) {
-                $content = $zip->getFromName($name);
-                $text .= strip_tags($content) . "\n";
-            }
+        if (($index = $zip->locateName("word/document.xml")) !== false) {
+            $xmlData = $zip->getFromIndex($index);
+            $dom = new DOMDocument;
+            @$dom->loadXML($xmlData, LIBXML_NOENT | LIBXML_XINCLUDE | LIBXML_NOERROR | LIBXML_NOWARNING);
+            $zip->close();
+            
+            return extractNodeText($dom->documentElement);
         }
         $zip->close();
-        return $text;
     }
     return "";
+}
+
+/**
+ * Extract text from EPUB
+ */
+function extractTextFromEpub($filePath) {
+    if (!file_exists($filePath)) return "";
+    
+    $zip = new ZipArchive();
+    if ($zip->open($filePath) !== TRUE) {
+        error_log("❌ Failed to open EPUB zip: $filePath");
+        return "";
+    }
+
+    // 1. Find OPF path from META-INF/container.xml
+    $containerXml = $zip->getFromName('META-INF/container.xml');
+    if (!$containerXml) {
+        $zip->close();
+        return "";
+    }
+
+    $dom = new DOMDocument();
+    @$dom->loadXML($containerXml);
+    $rootfile = $dom->getElementsByTagName('rootfile')->item(0);
+    if (!$rootfile) {
+        $zip->close();
+        return "";
+    }
+    
+    $opfPath = $rootfile->getAttribute('full-path');
+    $opfDir = dirname($opfPath);
+    if ($opfDir === '.') $opfDir = '';
+    else $opfDir .= '/';
+
+    // 2. Parse OPF to get Spine and Manifest
+    $opfXml = $zip->getFromName($opfPath);
+    if (!$opfXml) {
+        $zip->close();
+        return "";
+    }
+
+    $domOpf = new DOMDocument();
+    @$domOpf->loadXML($opfXml);
+    
+    // Convert Manifest to ID -> Href map
+    $manifest = [];
+    foreach ($domOpf->getElementsByTagName('item') as $item) {
+        $id = $item->getAttribute('id');
+        $href = $item->getAttribute('href');
+        $manifest[$id] = $href;
+    }
+
+    // 3. Iterate Spine to get reading order
+    $fullText = "";
+    foreach ($domOpf->getElementsByTagName('itemref') as $itemref) {
+        $idref = $itemref->getAttribute('idref');
+        if (isset($manifest[$idref])) {
+            $fileHref = $manifest[$idref];
+            // Resolve path relative to OPF
+            $contentPath = $opfDir . $fileHref;
+            
+            $content = $zip->getFromName($contentPath);
+            if ($content) {
+                // Strip tags (simple approach) or use DOM
+                // Adding a space ensures words don't merge across tags
+                $cleanText = strip_tags(str_replace(['<br>', '<p>', '</div>'], ["\n", "\n\n", "\n"], $content));
+                $fullText .= $cleanText . "\n";
+            }
+        }
+    }
+    
+    $zip->close();
+    // Decode HTML entities
+    return html_entity_decode($fullText, ENT_QUOTES | ENT_HTML5);
 }
 
 /**
@@ -108,7 +195,8 @@ function getEmbeddingWithRetry($gemini, $text, $retries = 3) {
             return $response->embedding->values;
         } catch (Exception $e) {
             $attempt++;
-            // თუ JSON error ან 429 არის, ველოდებით
+            if ($attempt >= $retries) throw $e;
+            
             if (strpos($e->getMessage(), 'JSON') !== false || strpos($e->getMessage(), '429') !== false) {
                 echo "   ⚠️ API Busy (Attempt $attempt/$retries). Sleeping 10s...\n";
                 sleep(10);
@@ -117,7 +205,6 @@ function getEmbeddingWithRetry($gemini, $text, $retries = 3) {
             }
         }
     }
-    throw new Exception("Failed to get embedding after $retries attempts");
 }
 
 function splitPdfAndExtractWithGemini($tempFile, $gemini, $fileName) {
@@ -144,26 +231,35 @@ function splitPdfAndExtractWithGemini($tempFile, $gemini, $fileName) {
             
             try {
                 $pdfData = base64_encode(file_get_contents($segmentFile));
-                $model = $gemini->generativeModel('models/gemini-3-flash-preview');
+                $model = $gemini->generativeModel('models/gemini-2.0-flash');
                 
-                // Retry logic for OCR
                 $success = false;
                 $ocrRetries = 0;
                 while (!$success && $ocrRetries < 3) {
                     try {
                         $response = $model->generateContent([
-                            "Transcribe text only.",
+                            "Extract all text from these PDF pages. Return ONLY the text, no conversational filler.",
                             new \Gemini\Data\Blob(mimeType: \Gemini\Enums\MimeType::APPLICATION_PDF, data: $pdfData)
                         ]);
-                        $candidate = $response->candidates[0] ?? null;
-                        if ($candidate) {
-                            $extractedText .= ($candidate->content->parts[0]->text ?? "") . "\n";
-                            $success = true;
+                        
+                        if (!empty($response->candidates) && isset($response->candidates[0])) {
+                            $candidate = $response->candidates[0];
+                            if (!empty($candidate->content->parts) && isset($candidate->content->parts[0])) {
+                                $extractedText .= ($candidate->content->parts[0]->text ?? "") . "\n";
+                                $success = true;
+                            }
                         }
+
+                        if (!$success && !empty($response->promptFeedback)) {
+                            echo "      ⚠️ Segment blocked by safety filter.\n";
+                            $success = true; // Skip
+                        }
+                        
+                        if (!$success) throw new Exception("Empty response");
+
                     } catch (Exception $e) {
                         $ocrRetries++;
-                        $errMsg = $e->getMessage();
-                        echo "   ⚠️ OCR Error: $errMsg. Sleeping 15s...\n";
+                        echo "   ⚠️ OCR Error: " . $e->getMessage() . ". Sleeping 15s (Attempt $ocrRetries)...\n";
                         sleep(15);
                     }
                 }
@@ -172,13 +268,15 @@ function splitPdfAndExtractWithGemini($tempFile, $gemini, $fileName) {
                 echo "   ❌ Segment Error: " . $ge->getMessage() . "\n";
             }
             if (file_exists($segmentFile)) unlink($segmentFile);
-            usleep(500000); 
         }
     } catch (Exception $e) {
         echo "❌ Splitting failed: " . $e->getMessage() . "\n";
     }
     return $extractedText;
 }
+
+// ... (main loop continues below, using the same robust logic) ...
+
 
 // --- მთავარი პროცესი ---
 

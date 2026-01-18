@@ -28,9 +28,10 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg && \
 
 # 3. PHP კონფიგურაცია
 RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini" && \
-    echo "upload_max_filesize = 20M" >> /usr/local/etc/php/conf.d/uploads.ini && \
-    echo "post_max_size = 20M" >> /usr/local/etc/php/conf.d/uploads.ini && \
-    echo "memory_limit = 256M" >> /usr/local/etc/php/conf.d/uploads.ini
+    echo "upload_max_filesize = 100M" >> /usr/local/etc/php/conf.d/uploads.ini && \
+    echo "post_max_size = 100M" >> /usr/local/etc/php/conf.d/uploads.ini && \
+    echo "memory_limit = 512M" >> /usr/local/etc/php/conf.d/uploads.ini && \
+    echo "max_execution_time = 300" >> /usr/local/etc/php/conf.d/uploads.ini
 
 # 4. საქაღალდეების შექმნა (db საქაღალდე აუცილებელია SQLite-ისთვის)
 RUN mkdir -p /var/www/html/db /var/log/php /run/nginx \
@@ -43,6 +44,9 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 WORKDIR /var/www/html
 COPY . .
+
+# Move dist contents to root to serve new frontend (overwrites old index.html)
+RUN cp -r dist/* .
 
 # უფლებების მიცემა database ფაილისთვის
 RUN chown -R www-data:www-data /var/www/html

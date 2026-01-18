@@ -17,9 +17,10 @@ function cosineSimilarity($vec1, $vec2) {
     return ($divisor == 0) ? 0 : $dotProduct / $divisor;
 }
 
-function searchKnowledgeBase($query) {
-   $api_key = getenv('GEMINI_API_KEY');
-    $db_file = __DIR__ . '/db/database.sqlite';
+function searchKnowledgeBase($query, $allowedFiles = []) {
+   // HARDCODED KEY AS REQUESTED (Replace with your actual key)
+   $api_key = 'YOUR_GEMINI_API_KEY';
+    $db_file = __DIR__ . '/db/example_database.sqlite';
 
     $gemini = Gemini::client($api_key);
     
@@ -27,6 +28,7 @@ function searchKnowledgeBase($query) {
         $pdo = new PDO("sqlite:$db_file");
         $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     } catch (PDOException $e) {
+        echo "❌ DB Error: " . $e->getMessage() . "\n";
         return [];
     }
 
@@ -35,18 +37,31 @@ function searchKnowledgeBase($query) {
         $response = $gemini->embeddingModel('models/text-embedding-004')->embedContent($query);
         $queryEmbedding = $response->embedding->values;
     } catch (Exception $e) {
+        echo "❌ Embedding Error: " . $e->getMessage() . "\n";
         return [];
     }
 
     // 2. ძებნა
-    $stmt = $pdo->query("SELECT id, file_name, chunk_text, embedding FROM knowledge_chunks");
+    $sql = "SELECT id, file_name, chunk_text, embedding FROM knowledge_chunks";
+    $params = [];
+
+    if (!empty($allowedFiles)) {
+        // Prepare placeholders for IN clause
+        $placeholders = implode(',', array_fill(0, count($allowedFiles), '?'));
+        $sql .= " WHERE file_name IN ($placeholders)";
+        $params = array_values($allowedFiles);
+    }
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+
     $results = [];
 
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $embedding = json_decode($row['embedding']);
         $similarity = cosineSimilarity($queryEmbedding, $embedding);
         
-        if ($similarity > 0.45) {
+        if ($similarity > 0.40) {
             $row['score'] = $similarity;
             unset($row['embedding']);
             $results[] = $row;
@@ -57,6 +72,6 @@ function searchKnowledgeBase($query) {
         return $b['score'] <=> $a['score'];
     });
 
-    return array_slice($results, 0, 5);
+    return array_slice($results, 0, 100);
 }
 ?>

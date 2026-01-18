@@ -1,6 +1,8 @@
 <?php
-$api_key = getenv('GEMINI_API_KEY');
-$url = "https://generativelanguage.googleapis.com/v1beta/models?key=" . $API_KEY;
+require 'vendor/autoload.php';
+// HARDCODED KEY AS REQUESTED (Replace with your actual key in env)
+$API_KEY = 'YOUR_GEMINI_API_KEY'; 
+$url = "https://generativelanguage.googleapis.com/v1beta/models?key=$API_KEY";
 
 $ch = curl_init($url);
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
