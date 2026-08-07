@@ -23,7 +23,7 @@ if (!$api_key) $api_key = getenv('GEMINI_API_KEY');
 if (!$api_key) die("❌ API Key missing.\n");
 
 $client = Gemini::client($api_key);
-$model = $client->generativeModel('models/gemini-2.0-flash');
+$model = $client->generativeModel('models/gemini-3-flash-preview');
 
 $unknownFiles = [
     '021.pdf',

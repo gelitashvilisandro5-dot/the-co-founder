@@ -6,7 +6,8 @@ require 'vendor/autoload.php';
 error_reporting(E_ALL & ~E_NOTICE & ~E_WARNING & ~E_DEPRECATED);
 
 
-$bucket_name = getenv('GOOGLE_STORAGE_BUCKET');
+// HARDCODED BUCKET AS REQUESTED
+$bucket_name = 'the-cofounder-knowledge-base';
 $api_key = getenv('GEMINI_API_KEY');
 
 ini_set('memory_limit', '2048M');

@@ -44,7 +44,7 @@ if (!$api_key) {
     die("❌ Error: GEMINI_API_KEY not found in environment or .env file.\n");
 }
 
-$bucket_name = 'YOUR_BUCKET_NAME';
+$bucket_name = 'the-cofounder-knowledge-base';
 $db_file = __DIR__ . '/db/database.sqlite';
 
 // LIST OF FILES TO REPAIR / TRANSLATE
@@ -259,7 +259,7 @@ function attemptGeminiOCR($client, $pdfPath, $pStart, $pEnd, $config = []) {
             );
             
             // Using 2.0 Flash as it is good at this
-            $model = $client->generativeModel('models/gemini-2.0-flash');
+            $model = $client->generativeModel('models/gemini-3-flash-preview');
             $response = $model->generateContent([
                 $prompt,
                 $part
