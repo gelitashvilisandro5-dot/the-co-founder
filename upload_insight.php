@@ -44,7 +44,7 @@ ARCHITECTURE:
      * Pattern-based search
      * Batch operations for RAG
      * Metadata management
-   - Bucket: YOUR_BUCKET_NAME
+   - Bucket: the-cofounder-knowledge-base
    - Contains: 137 business/entrepreneurship books (PDFs)
 
 4. INFRASTRUCTURE

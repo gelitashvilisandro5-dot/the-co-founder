@@ -36,8 +36,8 @@ if (!$api_key) {
     die("❌ Error: GEMINI_API_KEY not found!\n");
 }
 
-// HARDCODED BUCKET AS REQUESTED (Replace with your actual bucket name)
-$bucket_name = 'YOUR_BUCKET_NAME';
+// HARDCODED BUCKET AS REQUESTED
+$bucket_name = 'the-cofounder-knowledge-base';
 $db_file = __DIR__ . '/db/database.sqlite';
 
 // --- კლიენტები ---
@@ -231,7 +231,7 @@ function splitPdfAndExtractWithGemini($tempFile, $gemini, $fileName) {
             
             try {
                 $pdfData = base64_encode(file_get_contents($segmentFile));
-                $model = $gemini->generativeModel('models/gemini-2.0-flash');
+                $model = $gemini->generativeModel('models/gemini-3-flash-preview');
                 
                 $success = false;
                 $ocrRetries = 0;

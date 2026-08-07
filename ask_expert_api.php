@@ -1,11 +1,9 @@
 <?php
 /**
  * ask_expert_api.php
- * Web API wrapper for the Expert Reasoning engine.
- * Mimics the Gemini API response structure for frontend compatibility.
+ * Streaming SSE API wrapper for the Expert engine.
  */
 
-header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
@@ -16,72 +14,160 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 require 'ask_expert.php';
 
-// Get input
-$inputJSON = file_get_contents('php://input');
-// LOG RAW INPUT TO SEE EXACTLY WHAT IS SENT
-error_log("🔍 RAW API INPUT: " . substr($inputJSON, 0, 1000)); // Log first 1000 chars
+set_time_limit(0);
+ignore_user_abort(false);
 
-$input = json_decode($inputJSON, true);
+$rawInput = file_get_contents('php://input');
+$payload = json_decode($rawInput, true);
 
-// Extract the user message parts (Text + Files)
-// The frontend sends { contents: [{ parts: [...] }], conversationHistory: [...] }
-$parts = [];
-$userTextForSearch = '';
-$conversationHistory = [];
-
-// Extract conversation history if provided
-if (isset($input['conversationHistory']) && is_array($input['conversationHistory'])) {
-    $conversationHistory = $input['conversationHistory'];
-    error_log("🧠 API RECEIVED HISTORY: " . count($conversationHistory) . " messages");
-} else {
-    error_log("⚠️ API: No conversation history received");
+if (!is_array($payload)) {
+    header('Content-Type: application/json');
+    http_response_code(400);
+    echo json_encode(['error' => 'Invalid JSON payload']);
+    exit;
 }
 
-if (isset($input['contents'][0]['parts'])) {
-    foreach ($input['contents'][0]['parts'] as $part) {
-        // Collect all parts (text and inlineData) to pass to Gemini
-        $parts[] = $part;
+$parts = [];
+$conversationHistory = [];
 
-        // Extract just text for RAG search
-        if (isset($part['text'])) {
-            $userTextForSearch .= $part['text'] . " ";
-        }
+if (isset($payload['conversationHistory']) && is_array($payload['conversationHistory'])) {
+    $conversationHistory = $payload['conversationHistory'];
+}
+
+if (isset($payload['contents'][0]['parts']) && is_array($payload['contents'][0]['parts'])) {
+    foreach ($payload['contents'][0]['parts'] as $part) {
+        $parts[] = $part;
     }
 }
 
-$userTextForSearch = trim($userTextForSearch);
-
-// If no text, we can't search RAG, but might still have an image.
-// If both empty, error.
 if (empty($parts)) {
+    header('Content-Type: application/json');
+    http_response_code(400);
     echo json_encode(['error' => 'Empty message content']);
     exit;
 }
 
-// Call the expert logic with parts AND conversation history
-ob_start();
-$expertAnswer = askExpert($parts, $conversationHistory);
-ob_end_clean();
+/**
+ * Compatibility mode:
+ * - stream=true => SSE streaming response
+ * - stream missing/false => JSON response (legacy clients)
+ */
+$streamRequested = false;
+if (isset($payload['stream'])) {
+    $streamRequested = filter_var($payload['stream'], FILTER_VALIDATE_BOOLEAN);
+} else {
+    $accept = $_SERVER['HTTP_ACCEPT'] ?? '';
+    if (stripos($accept, 'text/event-stream') !== false) {
+        $streamRequested = true;
+    }
+}
 
-// Format response to look like Gemini API for frontend compatibility
-$response = [
-    'candidates' => [
-        [
-            'content' => [
-                'parts' => [
-                    ['text' => $expertAnswer]
-                ],
-                'role' => 'model'
-            ],
-            'finishReason' => 'STOP',
-            'index' => 0
-        ]
-    ],
-    'usageMetadata' => [
-        'promptTokenCount' => 0,
-        'candidatesTokenCount' => 0,
-        'totalTokenCount' => 0
-    ]
-];
+if (!$streamRequested) {
+    header('Content-Type: application/json');
+    try {
+        $text = askExpert($parts, $conversationHistory, false, null);
+        echo json_encode([
+            'text' => $text,
+            // Keep Gemini-like structure for legacy frontend compatibility.
+            'candidates' => [
+                [
+                    'content' => [
+                        'parts' => [
+                            ['text' => $text]
+                        ]
+                    ]
+                ]
+            ]
+        ], JSON_UNESCAPED_UNICODE);
+    } catch (Exception $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+    }
+    exit;
+}
 
-echo json_encode($response);
+if (function_exists('apache_setenv')) {
+    apache_setenv('no-gzip', '1');
+}
+ini_set('output_buffering', 'off');
+ini_set('zlib.output_compression', '0');
+
+while (ob_get_level() > 0) {
+    ob_end_clean();
+}
+
+header('Content-Type: text/event-stream');
+header('Cache-Control: no-cache');
+header('Connection: keep-alive');
+header('X-Accel-Buffering: no');
+
+function sseSendComment($message)
+{
+    echo ': ' . $message . "\n\n";
+    @flush();
+}
+
+function sseSendData($data)
+{
+    echo 'data: ' . json_encode($data, JSON_UNESCAPED_UNICODE) . "\n\n";
+    @flush();
+}
+
+$startTime = microtime(true);
+$firstTokenAt = null;
+$charCount = 0;
+
+sseSendComment('start');
+
+try {
+    $stream = askExpert($parts, $conversationHistory, true, function ($msg) {
+        sseSendComment($msg);
+    });
+
+    if (is_iterable($stream)) {
+        foreach ($stream as $part) {
+            if (connection_aborted()) {
+                error_log('🛑 Client disconnected - streaming stopped');
+                break;
+            }
+
+            $textChunk = '';
+            if (is_string($part)) {
+                $textChunk = $part;
+            } elseif (is_object($part) && method_exists($part, 'text')) {
+                $textChunk = (string) $part->text();
+            }
+
+            if ($textChunk === '' || trim($textChunk) === '') {
+                continue;
+            }
+
+            if ($firstTokenAt === null) {
+                $firstTokenAt = microtime(true);
+            }
+
+            $charCount += mb_strlen($textChunk, 'UTF-8');
+            sseSendData(['text' => $textChunk]);
+        }
+    } elseif (is_string($stream)) {
+        $charCount = mb_strlen($stream, 'UTF-8');
+        $firstTokenAt = microtime(true);
+        sseSendData(['text' => $stream]);
+    } else {
+        sseSendData(['error' => 'Unexpected response type from AI']);
+    }
+
+    if (!connection_aborted()) {
+        echo "data: [DONE]\n\n";
+        @flush();
+    }
+
+    $endTime = microtime(true);
+    $ttft = $firstTokenAt !== null ? round(($firstTokenAt - $startTime) * 1000) : null;
+    $totalMs = round(($endTime - $startTime) * 1000);
+
+    error_log('📊 SSE KPI | TTFT(ms): ' . ($ttft ?? 'n/a') . ' | Total(ms): ' . $totalMs . ' | Chars: ' . $charCount);
+} catch (Exception $e) {
+    error_log('❌ STREAMING ERROR: ' . $e->getMessage());
+    sseSendData(['error' => $e->getMessage()]);
+}
